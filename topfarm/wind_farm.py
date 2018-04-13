@@ -139,7 +139,7 @@ class WindFarmLayout(dict):
         # load relevant data from class structure
         wt_type = self._wf_dict['layout'][i_wt]['turbine_type']  # turb type
         wt_conf = self._wf_dict['layout'][i_wt]['strategy']  # cntrl confg
-        wt_dict = [d for d in self._wf_dict['turbine_types'] \
+        wt_dict = [d for d in self._wf_dict['turbine_types']
                      if d['name'] == wt_type][0]  # info of turbine type
         u_cutin = wt_dict['cut_in_wind_speed']  # cut in wsp
         u_cutout = wt_dict['cut_out_wind_speed']  # cut out wsp
@@ -175,14 +175,48 @@ class WindFarmLayout(dict):
     @property
     def wt_types(self):
         if not hasattr(self, '_wt_types'):
-            self._wt_types = [wt_type['name'] for wt_type in self._wf_dict['turbine_types']]
+            self._wt_types = [wt_type['name'] for wt_type in
+                                self._wf_dict['turbine_types']]
         return self._wt_types
 
     @property
     def wt_names(self):
         if not hasattr(self, '_wt_names'):
-            self._wt_names = [wt['turbine_type'] for wt in self._wf_dict['layout']]
+            self._wt_names = [wt['turbine_type'] for wt in
+                                self._wf_dict['layout']]
+            self._wt_names.sort()
         return self._wt_names
+
+    @property
+    def wt_positions(self):
+        if not hasattr(self, '_wt_positions'):
+            wt_positions = np.array([wt['position'] for wt in
+                                    self._wf_dict['layout']])
+            if wt_positions.shape[1] == 2:
+                # Oh, I noticed you have a flat terrain, let's add a third
+                # dimension to our wind turbine position
+                self._position_history = []
+                self.set_wt_positions(wt_positions)
+            else:
+                self._position_history = [self._wt_positions]
+        return self._wt_positions
+
+    def set_wt_positions(self, wt_positions):
+        """Set new wind turbine positions
+        """
+        if wt_positions.shape[1] == 2:
+            # Oh, I noticed you have a flat terrain, let's add a third dimension
+            # to our wind turbine position
+            new_positions = np.zeros([wt_positions.shape[0], 3])
+            new_positions[:, :2] = wt_positions
+            wt_positions = new_positions
+
+        self._wt_positions = wt_positions
+        # put it back into the wf_dict
+        for i_wt, name in enumerate(self.wt_names):
+            self._wf_dict['layout'][i_wt]['position'] = wt_positions[i, :]
+        # Add this to the position history
+        self._position_history.append(wt_positions)
 
     def get_turbine_summary(self, wt):
         i_type = self.wt_types.index(wt['turbine_type'])
@@ -194,7 +228,7 @@ class WindFarmLayout(dict):
         if len(wt['position']) == 2:
             # Special case of offshore, add 0
             wt['position'] = wt['position'] + [0]
-            
+
         return wt['position'] + [rotor_diameter, hub_height, rated_power,
                                  i_type, strat]
 
