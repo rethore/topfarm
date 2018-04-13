@@ -213,6 +213,166 @@ class WindResource(object):
     def ws_mean(self):
         return self.ws_moment(n=1.0)
 
+    def get_site_conditions(self, locations, wdirs):
+        """
+
+        Examples
+        --------
+
+        Parameters
+        ----------
+        locations: array:float
+            locations in (x, y, z) space.
+            z is height above terrain.
+            Dimensions are (n, 3) where n is the sample size and
+            the second dimension is position in x, y, and z space.
+
+        wdirs: array:float
+            Wind direction
+            Dimension is (n) where n is the sample size.
+
+        Returns
+        -------
+        ds: xarray.Dataset
+            Data container.
+            Contains: spd_up, tur, ver, A, k, f, alpha, ti
+
+        Notes
+        -----
+        In this version, there is only one wind rose shared among all the (x,y)
+        positions, so there is no horizontal interpolation necessary. It's useful
+        to speed things up in the cases of offshore wind farms.
+        This method can potentially achieve a speed-up in cases
+        where the same positions are requested many times, by
+        caching a map between the locations and the indicies of
+        the turbine (number)
+
+        """
+        locations = np.asarray(locations, dtype=float)
+        wdirs = np.asarray(wdirs, dtype=float)
+
+        def _sanitize_input(param, dims=1):
+            """
+            Private method to make sure that the input has the
+            correct structure and type.
+            """
+            if not isinstance(param, (np.ndarray)):
+
+                if isinstance(param, (tuple, list)):
+                    param = np.array(list(param))
+                elif isinstance(param, (float, int)):
+                    param = np.array([param])
+
+            if len(param.shape) == 0:
+                param = np.reshape(param, (1,) * dims)
+
+            if len(param.shape) < dims:
+                param = param[np.newaxis, :]
+
+            return param
+
+        def _wd_to_isec(wd_in, nsec):
+            """
+            Private method to convert wind direction to
+            sector index
+            """
+            wd = wd_in.copy()
+            sec_width = 360.0 / nsec
+            wd += sec_width/2
+            wd = np.mod(wd, 360.0)
+            return np.floor_divide(wd, sec_width).astype(int)
+
+        nsec = self._ds.dims['sec']
+        locations = _sanitize_input(locations, dims=2)
+        wdirs = _sanitize_input(wdirs, dims=1)
+
+        n, _ = locations.shape
+
+        if len(wdirs.shape) != 1:
+            raise ValueError('Expected wdirs to be one-dimensional!')
+
+        if ((n > 1) and (len(wdirs) == 1)):
+            wdirs = wdirs * np.ones([n])
+
+        if n != len(wdirs):
+            raise ValueError('Expected the same number of samples' +
+                             ' for locations and wdirs. OR len(wdirs) = 1')
+
+        # First we subset our dataset. Only variables that are listed below
+        # AND are in the dataset is used...
+        vars_out = ['x', 'y', 'z', 'elev', 'A', 'k', 'f', 'spd_up',
+                    'deviation', 'inflow_angle', 'tke_amb', 'tke_tot',
+                    'alpha', 'rho']
+        ds = self._ds[[v for v in vars_out if v in self._ds.data_vars]]
+
+        if 'x' in ds and 'y' in ds:
+            # Existing locations in the dataset
+            locs_ex = np.stack([ds['x'].values,
+                                ds['y'].values],
+                               axis=1)
+
+            # requested locations
+            locs_req = locations[:, :2]
+
+            # Find distance and index for n to the nearest turbine
+            dist_arr, indn_arr = spatial.KDTree(locs_ex).query(locs_req)
+
+            if any(dist_arr > 20.0):
+                print('Warning! some points are more than 20 ' +
+                      'meters from target locations...')
+        else:
+            indn_arr = np.ones(n)
+
+        # Existing heights in the dataset
+        heights_ex = ds['z'].values
+
+        if len(heights_ex) == 1:
+            # Only one height, we take that one
+            indz_arr = np.ones(n)
+        else:
+            # Requested heights
+            heights_req = locations[:, 2]
+
+            # Find indicies of nearest heights
+            indz_arr = np.argmin(np.abs(heights_ex[:, np.newaxis] -
+                                        heights_req[np.newaxis, :]), axis=0)
+
+            # Find distances of nearest heights
+            zdist = np.min(np.abs(heights_ex[:, np.newaxis] -
+                                  heights_req[np.newaxis, :]), axis=0)
+            if any(zdist > 5.0):
+                print('Warning! some points are more than 5 meter ' +
+                      'above or below the requested location')
+
+        # Find indices for dimension sec
+        inds_arr = _wd_to_isec(wdirs, nsec)
+        if ((n > 1) and (len(inds_arr) == 1)):
+            inds_arr = inds_arr * np.ones(len(inds_arr))
+
+        # Aggregate the data at the requested points
+        ds_loc_list = []
+        for i in range(n):
+
+            indn = indn_arr[i]
+            inds = inds_arr[i]
+            indz = indz_arr[i]
+
+            # Select and subset the dataset by the indicies and add to list
+            ds_loc_list.append(ds.isel(n=indn, sec=inds, z=indz))
+
+        # concatenate everything and force the right dimensions
+        ds_out = xr.concat(ds_loc_list, dim='n')
+
+        # Add wind directions to returned data.
+        ds_out['wd'] = xr.DataArray(wdirs,
+                                    coords=ds_out.coords,
+                                    dims=ds_out.dims)
+
+        # Calculate frequency per degree.
+        ds_out['freq_per_degree'] = ds_out['f'] * nsec / 360.0
+
+        return ds_out
+
 
 class WindResourceNodes(WindResource):
     """Extension of WindResource class to contain many WindResource nodes
