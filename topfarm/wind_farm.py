@@ -172,7 +172,51 @@ class WindFarmLayout(dict):
 
         return ct
 
+    @property
+    def wt_types(self):
+        if not hasattr(self, '_wt_types'):
+            self._wt_types = [wt_type['name'] for wt_type in self._wf_dict['turbine_types']]
+        return self._wt_types
+
+    @property
+    def wt_names(self):
+        if not hasattr(self, '_wt_names'):
+            self._wt_names = [wt['turbine_type'] for wt in self._wf_dict['layout']]
+        return self._wt_names
+
+    def get_turbine_summary(self, wt):
+        i_type = self.wt_types.index(wt['turbine_type'])
+        wt_dict = self._wf_dict['turbine_types'][i_type]
+        hub_height = wt_dict['hub_height']
+        rotor_diameter = wt_dict['rotor_diameter']
+        rated_power = wt_dict['rated_power']
+        strat = wt['strategy']
+        if len(wt['position']) == 2:
+            # Special case of offshore, add 0
+            wt['position'] = wt['position'] + [0]
+            
+        return wt['position'] + [rotor_diameter, hub_height, rated_power,
+                                 i_type, strat]
+
     def get_summary(self):
+        """Pandas dataframe with info for aep/wake model calculations
+
+        Returns
+        -------
+        layout : pd.DataFrame
+            Pandas dataframe with wind turbine locations (x, y, z), rotor
+            diameter in m (d), hub height in m (h), rater power in kW
+            (p_rated), index of wind turbine type (-), and control strategy.
+            Dataframe index is wind turbine index.
+        """
+        col_names = ['x', 'y', 'z', 'd', 'h', 'p_r', 'i_type', 'strat']
+        layout = pd.DataFrame([self.get_turbine_summary(wt)
+                             for wt in self._wf_dict['layout']],
+                            columns=col_names)
+        layout.index.name = 'i_wt'
+        return layout
+
+    def get_summary_old(self):
         """Pandas dataframe with info for aep/wake model calculations
 
         Returns
@@ -187,9 +231,14 @@ class WindFarmLayout(dict):
         wt_names = [wt['turbine_type'] for wt in self._wf_dict['layout']]
         wt_types = [wt_type['name'] for wt_type in \
                      self._wf_dict['turbine_types']]
+
         col_names = ['x', 'y', 'z', 'd', 'h', 'p_r', 'i_type', 'strat']
+
+
         layout = pd.DataFrame(np.full((len(wt_names), len(col_names)), np.nan),
                               columns=col_names)  # initialize dataframe
+
+
         for i_wt, wt in enumerate(self._wf_dict['layout']):
             i_type = wt_types.index(wt['turbine_type'])
             wt_dict = self._wf_dict['turbine_types'][i_type]
