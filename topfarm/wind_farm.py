@@ -214,7 +214,7 @@ class WindFarmLayout(dict):
         self._wt_positions = wt_positions
         # put it back into the wf_dict
         for i_wt, name in enumerate(self.wt_names):
-            self._wf_dict['layout'][i_wt]['position'] = wt_positions[i, :]
+            self._wf_dict['layout'][i_wt]['position'] = wt_positions[i_wt, :]
         # Add this to the position history
         self._position_history.append(wt_positions)
 
