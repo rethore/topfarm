@@ -822,11 +822,20 @@ def gwcfile_to_ds(file_name):
             header:   Waspdale
     """
 
+
+    def _readline(f):
+        line = f.readline()
+        # Removing the empty space lines
+        if re.fullmatch('\s*\r\n', line.decode()):
+            line = _readline(f)
+        return line
+
     def _parse_line_ints(f):
-        return [int(i) for i in f.readline().strip().split()]
+        return [int(i) for i in _readline(f).strip().split()]
 
     def _parse_line_floats(f):
-        return [float(i) for i in f.readline().strip().split()]
+        return [float(i) for i in _readline(f).strip().split()]
+
 
     with open(file_name, 'rb') as f:
 
