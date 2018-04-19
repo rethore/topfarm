@@ -229,7 +229,7 @@ class WindResource(object):
 
         wdirs: array:float
             Wind direction
-            Dimension is (n) where n is the sample size.
+            Dimension is (n_wd) where n_wd is the wind direction sample size.
 
         Returns
         -------
@@ -285,6 +285,7 @@ class WindResource(object):
         nsec = self._ds.dims['sec']
         locations = _sanitize_input(locations, dims=2)
         wdirs = _sanitize_input(wdirs, dims=1)
+        n_wd = wdirs.size
 
         n, _ = locations.shape
 
@@ -294,41 +295,24 @@ class WindResource(object):
         if ((n > 1) and (len(wdirs) == 1)):
             wdirs = wdirs * np.ones([n])
 
-        if n != len(wdirs):
-            raise ValueError('Expected the same number of samples' +
-                             ' for locations and wdirs. OR len(wdirs) = 1')
+        #if n != len(wdirs):
+
+            #raise ValueError('Expected the same number of samples' +
+            #                 ' for locations and wdirs. OR len(wdirs) = 1')
 
         # First we subset our dataset. Only variables that are listed below
         # AND are in the dataset is used...
-        vars_out = ['x', 'y', 'z', 'elev', 'A', 'k', 'f', 'spd_up',
+        vars_out = ['z', 'elev', 'A', 'k', 'f', 'spd_up',
                     'deviation', 'inflow_angle', 'tke_amb', 'tke_tot',
                     'alpha', 'rho']
         ds = self._ds[[v for v in vars_out if v in self._ds.data_vars]]
-
-        if 'x' in ds and 'y' in ds:
-            # Existing locations in the dataset
-            locs_ex = np.stack([ds['x'].values,
-                                ds['y'].values],
-                               axis=1)
-
-            # requested locations
-            locs_req = locations[:, :2]
-
-            # Find distance and index for n to the nearest turbine
-            dist_arr, indn_arr = spatial.KDTree(locs_ex).query(locs_req)
-
-            if any(dist_arr > 20.0):
-                print('Warning! some points are more than 20 ' +
-                      'meters from target locations...')
-        else:
-            indn_arr = np.ones(n)
 
         # Existing heights in the dataset
         heights_ex = ds['z'].values
 
         if len(heights_ex) == 1:
             # Only one height, we take that one
-            indz_arr = np.ones(n)
+            indz_arr = np.zeros(n, dtype=int)
         else:
             # Requested heights
             heights_req = locations[:, 2]
@@ -347,26 +331,42 @@ class WindResource(object):
         # Find indices for dimension sec
         inds_arr = _wd_to_isec(wdirs, nsec)
         if ((n > 1) and (len(inds_arr) == 1)):
-            inds_arr = inds_arr * np.ones(len(inds_arr))
+            inds_arr = inds_arr * np.ones(len(inds_arr), dtype=int)
 
         # Aggregate the data at the requested points
-        ds_loc_list = []
-        for i in range(n):
+        # ds_loc_list = []
+        # for i in range(n):
+        #     inds = inds_arr[i]
+        #     indz = indz_arr[i]
+        #
+        #     # Select and subset the dataset by the indicies and add to list
+        #     ds_loc_list.append(ds.isel(sec=inds, z=indz))
 
-            indn = indn_arr[i]
-            inds = inds_arr[i]
-            indz = indz_arr[i]
+        if 'z0' in self.coords:
+            if len(self.coords['z0']) == 1:
+                # concatenate everything and force the right dimensions
+                ds_out = xr.concat([
+                    xr.concat([ds.isel(sec=inds_arr[i_wd], z=indz_arr[i_wt], z0=0)
+                                for i_wd in range(n_wd)], dim='wd')
+                    for i_wt in range(n)], dim='wt')
+            else:
+                raise NotImplementedError('Please add the code to deal with ',
+                    'multiple roughnesses in the get_conditions method')
+        else:
+            # concatenate everything and force the right dimensions
+            ds_out = xr.concat([
+                xr.concat([ds.isel(sec=inds_arr[i_wd], z=indz_arr[i_wt])
+                            for i_wd in range(n_wd)], dim='wd')
+                for i_wt in range(n)], dim='wt')
 
-            # Select and subset the dataset by the indicies and add to list
-            ds_loc_list.append(ds.isel(n=indn, sec=inds, z=indz))
-
-        # concatenate everything and force the right dimensions
-        ds_out = xr.concat(ds_loc_list, dim='n')
+        # New coord
+        ds_out.coords['wt'] = range(n)
+        ds_out.coords['wd'] = wdirs
 
         # Add wind directions to returned data.
-        ds_out['wd'] = xr.DataArray(wdirs,
-                                    coords=ds_out.coords,
-                                    dims=ds_out.dims)
+        #ds_out['wd'] = xr.DataArray(wdirs,
+        #                            coords=new_coord,
+        #                            dims=ds_out.dims)
 
         # Calculate frequency per degree.
         ds_out['freq_per_degree'] = ds_out['f'] * nsec / 360.0

@@ -117,7 +117,39 @@ class WindFarmLayout(dict):
 
         return errors
 
-    def get_ct(self, i_wt, u):
+
+    def generate_pct(self):
+        self.p_curve = {}
+        self.u_pcurve = {}
+        self.ct_curve = {}
+        self.u_ctcurve = {}
+        self.u_cutin = np.full([self.n_wt], np.nan)
+        self.u_cutout = np.full([self.n_wt], np.nan)
+        self.ct_idle = np.full([self.n_wt], np.nan)
+
+        for i_wt in range(self.n_wt):
+            # load relevant data from class structure
+            wt_type = self._wf_dict['layout'][i_wt]['turbine_type']  # turb type
+            wt_conf = self._wf_dict['layout'][i_wt]['strategy']  # cntrl confg
+            wt_dict = [d for d in self._wf_dict['turbine_types'] \
+                         if d['name'] == wt_type][0]  # info of turbine type
+            self.u_cutin[i_wt] = wt_dict['cut_in_wind_speed']  # cut in wsp
+            self.u_cutout[i_wt] = wt_dict['cut_out_wind_speed']  # cut out wsp
+
+            # load power curve data
+            i_conf = wt_dict['control']['strategies'].index(wt_conf)
+            self.p_curve[i_wt] = np.array(wt_dict['power_curves'])[:, i_conf + 1]
+            self.u_pcurve[i_wt] = np.array(wt_dict['power_curves'])[:, 0]
+
+            # load relevant data from class structure
+            self.ct_idle[i_wt] = wt_dict['c_t_idle']
+
+            # load ct curve data
+            i_conf = wt_dict['control']['strategies'].index(wt_conf)
+            self.ct_curve[i_wt] = np.array(wt_dict['c_t_curves'])[:, i_conf + 1]
+            self.u_ctcurve[i_wt] = np.array(wt_dict['c_t_curves'])[:, 0]
+
+    def get_ct(self, i_wt, u, regenerate=False):
         """Calculate wind turbine thrust coefficient
 
         Parameters
@@ -126,6 +158,8 @@ class WindFarmLayout(dict):
             Index of wind turbine in wind farm layout.
         u : wind speed
             Wind speed in m/s.
+        regenerate: bool, [default=False]
+            regenerate the power curve / trust curve
 
         Returns
         -------
@@ -136,41 +170,39 @@ class WindFarmLayout(dict):
             len(u)
         except TypeError:
             u = np.array(u).reshape(1)
-        # load relevant data from class structure
-        wt_type = self._wf_dict['layout'][i_wt]['turbine_type']  # turb type
-        wt_conf = self._wf_dict['layout'][i_wt]['strategy']  # cntrl confg
-        wt_dict = [d for d in self._wf_dict['turbine_types']
-                     if d['name'] == wt_type][0]  # info of turbine type
-        u_cutin = wt_dict['cut_in_wind_speed']  # cut in wsp
-        u_cutout = wt_dict['cut_out_wind_speed']  # cut out wsp
-        ct_idle = wt_dict['c_t_idle']
 
-        # load ct curve data
-        i_conf = wt_dict['control']['strategies'].index(wt_conf)
-        ct_curve = np.array(wt_dict['c_t_curves'])[:, i_conf + 1]
-        u_ctcurve = np.array(wt_dict['c_t_curves'])[:, 0]
-        minu_ctcurve, maxu_ctcurve = u_ctcurve.min(), u_ctcurve.max()
+        if not hasattr(self, 'u_pcurve') or regenerate:
+            self.generate_pct()
+
+        minu_ctcurve = self.u_ctcurve[i_wt].min()
+        maxu_ctcurve = self.u_ctcurve[i_wt].max()
 
         # assign ct values
         ct = np.full(u.shape, np.nan)  # initialize to NaNs
-        mask_1 = u < u_cutin  # below cut-in
-        mask_2 = np.logical_and(u_cutin <= u, u < minu_ctcurve)  # cutin, umin
+        mask_1 = u < self.u_cutin[i_wt]  # below cut-in
+        mask_2 = np.logical_and(self.u_cutin[i_wt] <= u, u < minu_ctcurve)  # cutin, umin
         mask_3 = np.logical_and(minu_ctcurve <= u, u <= maxu_ctcurve)  # umn,mx
-        mask_4 = np.logical_and(maxu_ctcurve < u, u <= u_cutout)  # umax, ctout
-        mask_5 = u_cutout < u  # above cut-out
-        ct[mask_1] = ct_idle  # idle thrust below cut-in
-        ct[mask_5] = ct_idle  # idle thrust above cut-out
-        ct[mask_2] = np.interp(u[mask_2], [u_cutin, minu_ctcurve],
-                               [0, ct_curve[u_ctcurve.argmin()]])
-        ct[mask_4] = np.interp(u[mask_4], [maxu_ctcurve, u_cutout],
-                               [ct_curve[u_ctcurve.argmax()], 0])
-        ct[mask_3] = np.interp(u[mask_3], u_ctcurve, ct_curve)
+        mask_4 = np.logical_and(maxu_ctcurve < u, u <= self.u_cutout[i_wt])  # umax, ctout
+        mask_5 = self.u_cutout[i_wt] < u  # above cut-out
+        ct[mask_1] = self.ct_idle[i_wt]  # idle thrust below cut-in
+        ct[mask_5] = self.ct_idle[i_wt]  # idle thrust above cut-out
+        ct[mask_2] = np.interp(u[mask_2], [self.u_cutin[i_wt], minu_ctcurve],
+                               [0, self.ct_curve[i_wt][self.u_ctcurve[i_wt].argmin()]])
+        ct[mask_4] = np.interp(u[mask_4], [maxu_ctcurve, self.u_cutout[i_wt]],
+                               [self.ct_curve[i_wt][self.u_ctcurve[i_wt].argmax()], 0])
+        ct[mask_3] = np.interp(u[mask_3], self.u_ctcurve[i_wt], self.ct_curve[i_wt])
 
         # return a float if we were originally given a float
         if len(ct) == 1:
             ct = float(ct)
 
         return ct
+
+    @property
+    def n_wt(self):
+        if not hasattr(self, '_n_wt'):
+            self._n_wt = len(self._wf_dict['layout'])
+        return self._n_wt
 
     @property
     def wt_types(self):
@@ -286,7 +318,9 @@ class WindFarmLayout(dict):
 
         return layout
 
-    def get_power(self, i_wt, u):
+
+
+    def get_power(self, i_wt, u, regenerate=False):
         """Calculate wind turbine power in kW
 
         Parameters
@@ -295,6 +329,8 @@ class WindFarmLayout(dict):
             Index of wind turbine in wind farm layout.
         u : int, float, or iterable
             Wind speed(s) in m/s.
+        regenerate: bool, [default=False]
+            regenerate the power curve / trust curve
 
         Returns
         -------
@@ -307,33 +343,25 @@ class WindFarmLayout(dict):
         except TypeError:
             u = np.array(u).reshape(1)
 
-        # load relevant data from class structure
-        wt_type = self._wf_dict['layout'][i_wt]['turbine_type']  # turb type
-        wt_conf = self._wf_dict['layout'][i_wt]['strategy']  # cntrl confg
-        wt_dict = [d for d in self._wf_dict['turbine_types'] \
-                     if d['name'] == wt_type][0]  # info of turbine type
-        u_cutin = wt_dict['cut_in_wind_speed']  # cut in wsp
-        u_cutout = wt_dict['cut_out_wind_speed']  # cut out wsp
+        if not hasattr(self, 'u_pcurve') or regenerate:
+            self.generate_pct()
 
-        # load power curve data
-        i_conf = wt_dict['control']['strategies'].index(wt_conf)
-        p_curve = np.array(wt_dict['power_curves'])[:, i_conf + 1]
-        u_pcurve = np.array(wt_dict['power_curves'])[:, 0]
-        minu_pcurve, maxu_pcurve = u_pcurve.min(), u_pcurve.max()
+        minu_pcurve = self.u_pcurve[i_wt].min()
+        maxu_pcurve = self.u_pcurve[i_wt].max()
 
         # assign power values
         p = np.full(u.shape, np.nan)  # initialize to NaNs
-        mask_1 = u < u_cutin  # below cut-in
-        mask_2 = np.logical_and(u_cutin <= u, u < minu_pcurve)  # ctin, umin
+        mask_1 = u < self.u_cutin[i_wt]  # below cut-in
+        mask_2 = np.logical_and(self.u_cutin[i_wt] <= u, u < minu_pcurve)  # ctin, umin
         mask_3 = np.logical_and(minu_pcurve <= u, u <= maxu_pcurve)  # umin,max
-        mask_4 = np.logical_and(maxu_pcurve < u, u <= u_cutout)  # umax, ctout
-        mask_5 = u_cutout < u  # above cut-out
+        mask_4 = np.logical_and(maxu_pcurve < u, u <= self.u_cutout[i_wt])  # umax, ctout
+        mask_5 = self.u_cutout[i_wt] < u  # above cut-out
         p[mask_1] = 0  # no power below cut-in
         p[mask_5] = 0  # no power above cut-out
-        p[mask_2] = np.interp(u[mask_2], [u_cutin, minu_pcurve],
-                              [0, p_curve[u_pcurve.argmin()]])
-        p[mask_4] = p_curve[u_pcurve.argmax()] # p_u_max -> u_cutout
-        p[mask_3] = np.interp(u[mask_3], u_pcurve, p_curve)
+        p[mask_2] = np.interp(u[mask_2], [self.u_cutin[i_wt], minu_pcurve],
+                              [0, self.p_curve[i_wt][self.u_pcurve[i_wt].argmin()]])
+        p[mask_4] = self.p_curve[i_wt][self.u_pcurve[i_wt].argmax()] # p_u_max -> u_cutout
+        p[mask_3] = np.interp(u[mask_3], self.u_pcurve[i_wt], self.p_curve[i_wt])
 
         # return a float if we were originally given a float
         if len(p) == 1:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+from .wind_resource import WindResourceNodes
 import numpy as np
 
 class AEP(object):
@@ -46,23 +46,17 @@ class AEP(object):
         Used to transfer far field inflow wind speeds between different heights
         above the ground [m].
 
-    Returns
-    -------
-    wind2load: wind2load class
-        Specifying the load model for calculating mean equivalent fatigue loads
-        for each turbine at different channels. Currently it is the surrogate
-        load model implemented. Note that when wind2load is not provided as
-        input, this class will only calculate AEP.
-
 
     Methods
     -------
     reset_num_evals()
         Reset the number of AEP (and load) evalutions to zero.
 
-    cal_AEP_load(cal_load=True)
+    cal_AEP(cal_load=True)
         Calculate gross AEP, net AEP (and mean load) of this wind farm.
     """
+    DEFAULT_TI = 0.1
+
     def __init__(self,
                  site_conditions,  # include terrain and wind resource
                  wind_farm,  # defines the design of wind farm
@@ -73,13 +67,21 @@ class AEP(object):
                  k_star=0.075,  # wake decay parameter
                  availability=1.0,  # availability factor for the wind farm
                  num_evals=0,    # number of evluations of .cal_AEP_load()
-                 z0=0.001  # used to transfer wind speed between diff height
+                 z0=0.001,  # used to transfer wind speed between diff height
+                 ti=None # Turbulence intensity, if not specified in the site_conditions
                  ):
         """ ws_binned, wd_binned and height_ref defines a set of discretized
         ideal far field inflow condition at the a height above the ground
         (height_ref), which controls and specifies the bin sizes of wind speed
         and wind direction in the AEP calculation.
         """
+        if 'spd_up' in site_conditions._ds and \
+           'deviation' in site_conditions._ds and \
+           'inflow_angle' in site_conditions._ds:
+            self.terrain_type = 'complex'
+        else:
+            self.terrain_type = 'flat'
+
         # inputed attributes
         self.site_conditions = site_conditions
         self.wind_farm = wind_farm
@@ -91,14 +93,13 @@ class AEP(object):
         self.availability = availability
         self.num_evals = num_evals
         self.z0 = z0
+        self.ti = ti
 
         # calculated attributes (storing necessary data during calculation)
         self.num_ws_bins = len(ws_binned)
         self.num_wd_bins = len(wd_binned)
         self.wf_design = wind_farm.get_summary().values  # [x, y, z, D, H, P]
         self.num_turbines = len(self.wf_design[:, 0])
-        if self.wind2load is not None:
-            self.num_channels = self.wind2load.num_channel
 
         # Extend the wind dir bins to include an extra dir for integration
         self.num_wd_bins = self.num_wd_bins + 1
@@ -134,6 +135,7 @@ class AEP(object):
         self.set_wt_positions()
         # Calculate initial wt site condistions
         self.cal_wt_conditions()
+        self.cal_ideal_local_flows_field()
 
 
     def set_wt_positions(self, wt_positions=None):
@@ -151,6 +153,33 @@ class AEP(object):
         self.num_evals = 0
 
     def cal_wt_conditions(self):
+        conditions = self.site_conditions.get_site_conditions(
+            self.wt_positions, self.wd_binned)
+
+        self.Weibull_A_il = conditions['A'].values
+        self.Weibull_k_il = conditions['k'].values
+        self.frequency_il = conditions['freq_per_degree'].values
+
+        if 'tke_amb' in conditions:
+            self.turbulence_il = conditions['tke_amb'].values
+        else:
+            if self.ti is None:
+                self.turbulence_il = self.DEFAULT_TI * np.ones_like(self.Weibull_A_il)
+            else:
+                self.turbulence_il = self.ti * np.ones_like(self.Weibull_A_il)
+
+        if self.terrain_type == 'complex':
+            self.speed_up_il = conditions['spd_up'].values
+            self.turning_il = conditions['deviation'].values
+            self.inclination_il = conditions['inflow_angle'].values
+
+        ## TODO: Move to Wind2loads subclass?
+        if 'alpha' in conditions:
+            self.wind_shear_il = conditions['alpha'].values
+        if 'rho' in conditions:
+            self.rho_il = conditions['rho'].values
+
+    def slow_cal_wt_conditions(self):
         """Get and store sector (wind direction) wise site conditions
         """
         for l_wd in range(self.num_wd_bins):
@@ -171,11 +200,67 @@ class AEP(object):
                 self.turning_il[:, l_wd] = conditions['deviation'].values
                 self.inclination_il[:, l_wd] = conditions['inflow_angle'].values
 
-            ## Wind2loads?
-            if 'alpha' in conditions:
-                self.wind_shear_il[:, l_wd] = conditions['alpha'].values
-            if 'rho' in conditions:
-                self.rho_il[:, l_wd] = conditions['rho'].values
+            # ## TODO: Move to Wind2loads subclass?
+            # if 'alpha' in conditions:
+            #     self.wind_shear_il[:, l_wd] = conditions['alpha'].values
+            # if 'rho' in conditions:
+            #     self.rho_il[:, l_wd] = conditions['rho'].values
+
+    def cal_ideal_local_flows_field(self):
+        """Calculate the ideal local flows fields
+        """
+        if self.terrain_type == 'complex':
+            for l_wd in range(self.num_wd_bins):
+                wd = self.wd_binned[l_wd]
+
+                for k_ws in range(self.num_ws_bins):
+                    ws = self.ws_binned[k_ws]
+
+                    for i_wt in range(self.num_turbines):
+                        H_hub = self.wf_design[i_wt, 4]
+
+                        # calculate local wind speed and wind direction without
+                        # wake effects by considering terrain effect
+                        local_ws_ideal = (ws * np.log(H_hub / self.z0) /
+                                          np.log(self.height_ref / self.z0) *
+                                          speed_up_il[i_wt, l_wd])
+
+                        local_wd_ideal = (wd + turning_il[i_wt, l_wd])
+
+                        self.local_ws_ideal_ikl[i_wt, k_ws, l_wd] = local_ws_ideal
+                        self.local_wd_ideal_ikl[i_wt, k_ws, l_wd] = local_wd_ideal
+
+                        # calculating related pdf for all wind speeds
+                        self.local_pdf_ikl[i_wt, k_ws, l_wd] = \
+                            self.cal_pdf_Weibull(self.local_ws_ideal_ikl[i_wt,
+                                                                         k_ws,
+                                                                         l_wd],
+                                                 self.Weibull_A_il[i_wt, l_wd],
+                                                 self.Weibull_k_il[i_wt, l_wd]) \
+                            * self.frequency_il[i_wt, l_wd]
+        else:
+            # Terrain is flat
+            for l_wd in range(self.num_wd_bins):
+                wd = self.wd_binned[l_wd]
+
+                for k_ws in range(self.num_ws_bins):
+                    ws = self.ws_binned[k_ws]
+
+                    for i_wt in range(self.num_turbines):
+                        H_hub = self.wf_design[i_wt, 4]
+                        local_ws_ideal = (ws * np.log(H_hub / self.z0) /
+                                          np.log(self.height_ref / self.z0))
+                        self.local_ws_ideal_ikl[i_wt, k_ws, l_wd] = local_ws_ideal
+                        self.local_wd_ideal_ikl[i_wt, k_ws, l_wd] = wd
+
+                        # calculating related pdf for all wind speeds
+                        self.local_pdf_ikl[i_wt, k_ws, l_wd] = \
+                            self.cal_pdf_Weibull(self.local_ws_ideal_ikl[i_wt,
+                                                                         k_ws,
+                                                                         l_wd],
+                                                 self.Weibull_A_il[i_wt, l_wd],
+                                                 self.Weibull_k_il[i_wt, l_wd]) \
+                            * self.frequency_il[i_wt, l_wd]
 
     def cal_AEP(self):
         """ Calculate gross AEP, net AEP (and mean load) of this wind farm.
@@ -210,42 +295,19 @@ class AEP(object):
 
         #######################################################################
         # Step 1. Get and store sector (wind direction) wise site conditions
-        if isinstance(site_conditions, WindResourceNodes):
+        if isinstance(self.site_conditions, WindResourceNodes):
             # In case of a wind resource grid / nodes, we will recalculate the
             # site condition at every evaluation. Otherwise it's done only once
             # at the instanciation of the class.
-            self.cal_wt_conditions()
+            self.slow_cal_wt_conditions()
 
         #######################################################################
         # Step 2. Calculate ideal local flow field (ws, wd) and related pdf
-        for l_wd in range(self.num_wd_bins):
-            wd = self.wd_binned[l_wd]
-
-            for k_ws in range(self.num_ws_bins):
-                ws = self.ws_binned[k_ws]
-
-                for i_wt in range(self.num_turbines):
-                    H_hub = self.wf_design[i_wt, 4]
-
-                    # calculate local wind speed and wind direction without
-                    # wake effects by considering terrain effect
-                    local_ws_ideal = (ws * np.log(H_hub / self.z0) /
-                                      np.log(self.height_ref / self.z0) *
-                                      speed_up_il[i_wt, l_wd])
-
-                    local_wd_ideal = (wd + turning_il[i_wt, l_wd])
-
-                    self.local_ws_ideal_ikl[i_wt, k_ws, l_wd] = local_ws_ideal
-                    self.local_wd_ideal_ikl[i_wt, k_ws, l_wd] = local_wd_ideal
-
-                    # calculating related pdf for all wind speeds
-                    self.local_pdf_ikl[i_wt, k_ws, l_wd] = \
-                        self.cal_pdf_Weibull(self.local_ws_ideal_ikl[i_wt,
-                                                                     k_ws,
-                                                                     l_wd],
-                                             Weibull_A_il[i_wt, l_wd],
-                                             Weibull_k_il[i_wt, l_wd]) \
-                        * frequency_il[i_wt, l_wd]
+        if self.terrain_type == 'complex':
+            # If the terrain is complex we need to recalculate the local flow
+            # field at every function call, otherwise, this is done at the
+            # __init__ phase
+            self.cal_ideal_local_flows_field()
 
         #######################################################################
         # Step 3. Calculate ideal local Ct and power
@@ -266,7 +328,7 @@ class AEP(object):
         # assuming same wake decay coefficients for all turbines
         k_star_list = [self.k_star] * self.num_turbines
 
-        (self.local_ws_real_ikl, self.local_TI_real_ikl) = self.wake_model.cal_wake(
+        (self.local_ws_real_ikl, dum) = self.wake_model.cal_wake(
                     self.wf_design[:, 0],   # [x_i]
                     self.wf_design[:, 1],   # [y_i]
                     self.wf_design[:, 4],   # [H_i]]
@@ -274,7 +336,7 @@ class AEP(object):
                     self.local_ws_ideal_ikl,
                     self.local_wd_ideal_ikl,
                     self.local_Ct_ikl,
-                    turbulence_il,
+                    self.turbulence_il,
                     k_star_list)
 
         #######################################################################
@@ -284,44 +346,8 @@ class AEP(object):
                     self.wind_farm.get_power(i_wt,
                                              self.local_ws_real_ikl[i_wt, :,
                                                                     :]))
-
         #######################################################################
-        # Step 6. Calculate loads
-
-        # if the wind2load is available and load calculation is turned on
-        if (self.wind2load is not None) and cal_load:
-            # for the single value 0 dimension vectorized calculation
-            # for l_wd in range(self.num_wd_bins):
-            #     for k_ws in range(self.num_ws_bins):
-            #         for i_wt in range(self.num_turbines):
-            #
-            #             self.load_iklm[i_wt, k_ws, l_wd, :] = (
-            #                 self.wind2load.load_calculation(
-            #                     self.local_ws_real_ikl[i_wt, k_ws, l_wd],
-            #                     self.local_TI_real_ikl[i_wt, k_ws, l_wd],
-            #                     wind_shear_il[i_wt, l_wd],
-            #                     inclination_il[i_wt, l_wd],
-            #                     rho_il[i_wt, l_wd],
-            #                     self.wf_design[i_wt, 4],      # H
-            #                     self.wf_design[i_wt, 3],      # D
-            #                     self.wf_design[i_wt, 5]))     # P_rated
-            # 2d dimensional data passing of vectorized calculation
-            for i_wt in range(self.num_turbines):
-                self.load_iklm[i_wt, :, :, :] = (
-                    self.wind2load.load_calculation_2d(
-                        self.local_ws_real_ikl[i_wt, :, :],
-                        self.local_TI_real_ikl[i_wt, :, :],
-                        np.tile(wind_shear_il[i_wt, :],
-                                (self.num_ws_bins, 1)),
-                        np.tile(inclination_il[i_wt, :],
-                                (self.num_ws_bins, 1)),
-                        np.tile(rho_il[i_wt, :], (self.num_ws_bins, 1)),
-                        self.wf_design[i_wt, 4],  # H
-                        self.wf_design[i_wt, 3],  # D
-                        self.wf_design[i_wt, 5]))  # P_rated
-
-        #######################################################################
-        # Step 7. Calculate mean power and AEP values using numerical integ.
+        # Step 6. Calculate mean power and AEP values using numerical integ.
 
         delta_ws = (self.local_ws_ideal_ikl[:, 1:, 1:] -
                     self.local_ws_ideal_ikl[:, :-1, 1:])
@@ -347,32 +373,11 @@ class AEP(object):
         AEP_gross = num_hrs_a_year * mean_power_ideal * self.availability
         AEP_net = num_hrs_a_year * mean_power_real * self.availability
 
-        #######################################################################
-        # Step 8. Calculate loads
-
-        # if the wind2load is available and load calculation is turned on
-        if (self.wind2load is not None) and cal_load:
-            load_array = (self.load_iklm[:, 1:, 1:, :]
-                          + self.load_iklm[:, :-1, 1:, :])/2
-            slope_array = self.wind2load.pce_slopes
-            mean_loads = np.zeros([self.num_turbines, self.num_channels])
-
-            for m_channel in range(self.num_channels):
-                mean_loads[:, m_channel] = (np.sum(
-                    delta_ws * delta_wd * pdf_array *
-                    (load_array[:, :, :, m_channel] **
-                     slope_array[m_channel]), (1, 2))
-                     / self.wind2load.frequence) ** \
-                    (1 / slope_array[m_channel])
-
         #################################################################
         # updating number of evluations
         self.num_evals = self.num_evals + 1
 
-        if (self.wind2load is not None) and cal_load:
-            return (AEP_gross, AEP_net, mean_loads)
-        else:
-            return (AEP_gross, AEP_net)
+        return (AEP_gross, AEP_net)
 
     def cal_AEP_load_naive(self, cal_load=True):
         """ Calculate gross AEP, net AEP and mean load of this wind farm

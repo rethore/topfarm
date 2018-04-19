@@ -4,6 +4,8 @@ import numpy as np
 import os
 import shutil
 import subprocess
+from fusedwake.gcl.interface import GCL
+from fusedwake.WindFarm import WindFarm
 
 class WakeModel():
     """ Compute wake effects
@@ -12,37 +14,43 @@ class WakeModel():
     """
     def __init__(self,
                  wake_model='NO_Jensen',
-                 turbulence_model='GC_Larsen_turb'):
+                 turbulence_model='GC_Larsen_turb',
+                 wind_farm_yml=None):
         self.wake_model = wake_model
         self.turbulence_model = turbulence_model
+        if not wind_farm_yml is None:
+            self.wf = WindFarm(yml=wind_farm_yml)
+            self.gcl = GCL(WF=self.wf)
 
     def cal_wake(self, x, y, H, D, ws, wd, Ct, TI, k):
         """ Wrapper method for calculating wake effct.
         """
+        if self.wake_model == 'fort_gclm':
+            return self.gcl.cal_wake(x, y, H, D, ws, wd, Ct, TI, k)
         if self.wake_model == 'NO_Jensen':
             num_turbines,num_ws_bins,num_wd_bins = ws.shape
             shape_ikl = [num_turbines, num_ws_bins, num_wd_bins]
             local_ws_real_ikl = np.zeros(shape_ikl)
             local_TI_real_ikl = np.zeros(shape_ikl)
-            
+
             for l_wd in range(num_wd_bins):
                 for k_ws in range(num_ws_bins):
                     # calculate effective wind speed and turbulence intensity
-                    (ws_eff, TI_eff) = self.NO_Jensen(x, y, H, D, ws[:, k_ws, l_wd], 
+                    (ws_eff, TI_eff) = self.NO_Jensen(x, y, H, D, ws[:, k_ws, l_wd],
                         wd[:, k_ws, l_wd], Ct[:, k_ws, l_wd], TI[:, l_wd], k,
                         turbulence_model=self.turbulence_model)
-    
+
                     local_ws_real_ikl[:, k_ws, l_wd] = ws_eff
                     local_TI_real_ikl[:, k_ws, l_wd] = TI_eff
-                    
+
             return local_ws_real_ikl, local_TI_real_ikl
-        elif self.wake_model == 'FarmFlow':        
+        elif self.wake_model == 'FarmFlow':
             FarmFlowPath = 'C:\\Users\\bedon\\Documents\\FarmFlow 3.0b\\'
             FarmFlowProj = FarmFlowPath + 'Projects\\TopFarm\\'
-            
+
             nCpus = 4;
             airDensity = 1.225
-            
+
             num_turbines,num_ws_bins,num_wd_bins = ws.shape
             shape_ikl = [num_turbines, num_ws_bins, num_wd_bins]
             local_ws_real_ikl = np.zeros(shape_ikl)
@@ -51,7 +59,7 @@ class WakeModel():
             num_type_turbines = Ct_unique.shape[0]
             H_unique = H[index_unique]
             D_unique = D[index_unique]
-            
+
             # refresh folder
             if os.path.exists(FarmFlowProj):
                 shutil.rmtree(FarmFlowProj)
@@ -60,7 +68,7 @@ class WakeModel():
             turbinesFile = open(FarmFlowProj + 'turbines','w')
             for l_turb in range(num_type_turbines):
                 turbinesFile.write(f'TopFarmTurb{l_turb:.0f}.trb {H_unique[l_turb]:.1f}\n')
-            for l_turb in range(10-num_type_turbines):    
+            for l_turb in range(10-num_type_turbines):
                 turbinesFile.write(f'TopFarmTurb{0:.0f}.trb {H_unique[0]:.1f}\n')
             turbinesFile.close()
             # trb files
@@ -91,10 +99,10 @@ class WakeModel():
                 for k_ws in range(num_ws_bins):
                     inputFile.write(f'wind_data {wd[1,k_ws,l_wd]:.0f} {ws[1,k_ws,l_wd]:.1f} {TI[1, l_wd]:.3f}\n')
             inputFile.close()
-            
+
             # launch FarmFlow
             exitCode = subprocess.call([FarmFlowPath+'Source\\FarmFlow.exe',FarmFlowProj+'input'])
-            
+
             # read Results.txt
             with open(FarmFlowProj + '\\output\\Results.txt') as f:
                 for line in f:
@@ -107,9 +115,9 @@ class WakeModel():
                         i_wt = int(data[1].split('_')[1])
                         local_ws_real_ikl[i_wt, k_ws, l_wd] = data[8]
                         local_TI_real_ikl[i_wt, k_ws, l_wd] = data[9]
-                        
+
             return local_ws_real_ikl, local_TI_real_ikl
-            
+
         else:
             raise ValueError('The required wake model has not been \
                              implemented!')
